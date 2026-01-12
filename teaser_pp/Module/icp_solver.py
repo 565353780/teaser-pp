@@ -1,13 +1,11 @@
-import copy
 import torch
 import numpy as np
+from typing import Union, Optional
+
 import teaserpp_python
-from typing import Union
+from teaser_pp.Method.data import toNumpy, toPcd
 
 NOISE_BOUND = 0.05
-N_OUTLIERS = 1700
-OUTLIER_TRANSLATION_LB = 5
-OUTLIER_TRANSLATION_UB = 10
 
 
 def get_angular_error(R_exp, R_est):
@@ -25,36 +23,34 @@ class ICPSolver(object):
     def register_points(
         source_pts: Union[torch.Tensor, np.ndarray, list],
         target_pts: Union[torch.Tensor, np.ndarray, list],
+        common_point_num: Optional[int]=None,
     ) -> torch.Tensor:
-        # Load bunny ply file
-        src = np.transpose(source_pts)
-        N = src.shape[1]
+        source_pts = toNumpy(source_pts, np.float64).reshape(-1, 3)
+        target_pts = toNumpy(target_pts, np.float64).reshape(-1, 3)
 
-        # Apply arbitrary scale, translation and rotation
-        T = np.array(
-            [[9.96926560e-01, 6.68735757e-02, -4.06664421e-02, -1.15576939e-01],
-            [-6.61289946e-02, 9.97617877e-01, 1.94008687e-02, -3.87705398e-02],
-            [4.18675510e-02, -1.66517807e-02, 9.98977765e-01, 1.14874890e-01],
-            [0, 0, 0, 1]])
+        if common_point_num is None:
+            common_point_num = min(source_pts.shape[0], target_pts.shape[0])
 
-        dst_cloud = copy.deepcopy(src_cloud)
-        dst_cloud.transform(T)
-        dst = np.transpose(np.asarray(dst_cloud.points))
+        source_pcd = toPcd(source_pts)
+        target_pcd = toPcd(target_pts)
 
-        # Add some noise
-        dst += (np.random.rand(3, N) - 0.5) * 2 * NOISE_BOUND
+        if common_point_num < source_pts.shape[0]:
+            print('[INFO][ICPSolver::register_points]')
+            print('\t start sample source pts from', source_pts.shape[0], 'to', common_point_num, '...')
+            source_pcd = source_pcd.farthest_point_down_sample(common_point_num)
+        if common_point_num < target_pts.shape[0]:
+            print('[INFO][ICPSolver::register_points]')
+            print('\t start sample target pts from', target_pts.shape[0], 'to', common_point_num, '...')
+            target_pcd = target_pcd.farthest_point_down_sample(common_point_num)
 
-        # Add some outliers
-        outlier_indices = np.random.randint(N_OUTLIERS, size=N_OUTLIERS)
-        for i in range(outlier_indices.size):
-            shift = OUTLIER_TRANSLATION_LB + np.random.rand(3, 1) * (OUTLIER_TRANSLATION_UB - OUTLIER_TRANSLATION_LB)
-            dst[:, outlier_indices[i]] += shift.squeeze()
+        src = np.transpose(np.asarray(source_pcd.points))
+        dst = np.transpose(np.asarray(target_pcd.points))
 
         # Populating the parameters
         solver_params = teaserpp_python.RobustRegistrationSolver.Params()
         solver_params.cbar2 = 1
         solver_params.noise_bound = NOISE_BOUND
-        solver_params.estimate_scaling = False
+        solver_params.estimate_scaling = True
         solver_params.rotation_estimation_algorithm = teaserpp_python.RobustRegistrationSolver.ROTATION_ESTIMATION_ALGORITHM.GNC_TLS
         solver_params.rotation_gnc_factor = 1.4
         solver_params.rotation_max_iterations = 100
@@ -64,26 +60,4 @@ class ICPSolver(object):
         solver.solve(src, dst)
 
         solution = solver.getSolution()
-
-        print("=====================================")
-        print("          TEASER++ Results           ")
-        print("=====================================")
-
-        print("Expected rotation: ")
-        print(T[:3, :3])
-        print("Estimated rotation: ")
-        print(solution.rotation)
-        print("Error (rad): ")
-        print(get_angular_error(T[:3,:3], solution.rotation))
-
-        print("Expected translation: ")
-        print(T[:3, 3])
-        print("Estimated translation: ")
-        print(solution.translation)
-        print("Error (m): ")
-        print(np.linalg.norm(T[:3, 3] - solution.translation))
-
-        print("Number of correspondences: ", N)
-        print("Number of outliers: ", N_OUTLIERS)
-
         return solution
